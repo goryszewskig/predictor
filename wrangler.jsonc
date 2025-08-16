@@ -10,7 +10,7 @@
     {
       "binding": "DB",
       "database_name": "prediction-tracker-production",
-      "database_id": "placeholder-for-production-id"
+      "database_id": "77f956b4-2c06-410d-806b-b83d2acce279"
     }
   ]
 }
