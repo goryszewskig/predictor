@@ -119,9 +119,63 @@ A SaaS application for tracking predictions and verifying their accuracy over ti
 - **Database**: Cloudflare D1 (SQLite)
 - **Deployment**: Cloudflare Pages
 - **Analytics**: Google Analytics (G-3WBS5B7KF2)
+- **Security**: Multi-layered protection against abuse and automation
 - **Development**: PM2 for process management
 - **Icons**: Font Awesome
 - **HTTP Client**: Axios
+
+## 🔒 Security Features
+
+### **Anti-Abuse Protection**
+The application includes comprehensive security measures to prevent flooding, automation abuse, and malicious attacks:
+
+#### **Rate Limiting**
+- **Global Rate Limit**: 200 requests per 15 minutes for general browsing
+- **API Rate Limit**: 20 requests per 5 minutes for API endpoints
+- **POST Rate Limit**: 5 submissions per 10 minutes for form submissions
+- **Automatic Headers**: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`
+
+#### **Bot Detection & Prevention**
+- **User Agent Analysis**: Blocks suspicious user agents (curl, wget, scrapers, etc.)
+- **Header Validation**: Detects missing or suspicious request headers
+- **Proxy Detection**: Flags requests with excessive forwarded headers
+- **Cloudflare Bot Management**: Utilizes Cloudflare's bot scoring when available
+
+#### **Input Validation & Sanitization**
+- **SQL Injection Protection**: Scans for common injection patterns
+- **XSS Prevention**: Blocks malicious script content
+- **Length Limits**: Enforces reasonable field length restrictions
+- **Content Filtering**: Validates and sanitizes all user input
+
+#### **Honeypot Fields**
+- **Hidden Form Fields**: Invisible fields that only bots will fill
+- **Silent Bot Detection**: Automatically rejects requests with honeypot data
+- **No User Disruption**: Legitimate users never see honeypot fields
+
+#### **Behavioral Analysis**
+- **Submission Timing**: Detects forms completed too quickly (< 3 seconds)
+- **Pattern Recognition**: Identifies repetitive or suspicious request patterns
+- **Activity Tracking**: Monitors per-IP request frequency and diversity
+
+#### **Security Headers**
+- **Content Security Policy (CSP)**: Prevents XSS and code injection
+- **X-Frame-Options**: Prevents clickjacking attacks
+- **X-Content-Type-Options**: Prevents MIME type confusion
+- **Referrer Policy**: Controls referrer information leakage
+- **Permissions Policy**: Restricts access to sensitive browser APIs
+
+#### **Request Protection**
+- **Size Limits**: 50KB maximum request size for API endpoints
+- **CORS Restrictions**: Limited to prediction-tracker.pages.dev domain
+- **Method Validation**: Only allows GET and POST methods
+- **Content Type Validation**: Enforces proper content types
+
+### **Security Testing**
+✅ **Bot Detection**: Blocks curl, wget, and automated scripts  
+✅ **Rate Limiting**: Prevents rapid-fire requests  
+✅ **Input Validation**: Sanitizes all form submissions  
+✅ **Honeypot Protection**: Silently catches bot submissions  
+✅ **Security Headers**: Comprehensive browser protection  
 
 ## 🚀 Deployment
 
