@@ -118,6 +118,7 @@ A SaaS application for tracking predictions and verifying their accuracy over ti
 - **Frontend**: Vanilla JavaScript with Tailwind CSS
 - **Database**: Cloudflare D1 (SQLite)
 - **Deployment**: Cloudflare Pages
+- **Analytics**: Google Analytics (G-3WBS5B7KF2)
 - **Development**: PM2 for process management
 - **Icons**: Font Awesome
 - **HTTP Client**: Axios
