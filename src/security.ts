@@ -24,8 +24,8 @@ function getRateLimitStore() {
  */
 export function rateLimiter(config?: Partial<RateLimitConfig>) {
   const defaultConfig: RateLimitConfig = {
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    maxRequests: 100, // requests per window
+    windowMs: 60 * 1000, // 1 minute default
+    maxRequests: 20, // requests per window
     keyGenerator: (c) => {
       const cf = c.req.raw.cf as any
       return cf?.colo + ':' + (cf?.clientIP || c.req.header('x-forwarded-for') || 'unknown')
@@ -38,7 +38,13 @@ export function rateLimiter(config?: Partial<RateLimitConfig>) {
     const store = getRateLimitStore()
     const key = finalConfig.keyGenerator(c)
     const now = Date.now()
-    const windowStart = now - finalConfig.windowMs
+    
+    // Clean up any expired entries for this key and others
+    for (const [existingKey, existingRecord] of store.entries()) {
+      if (now > existingRecord.resetTime) {
+        store.delete(existingKey)
+      }
+    }
 
     let record = store.get(key)
     
@@ -55,11 +61,12 @@ export function rateLimiter(config?: Partial<RateLimitConfig>) {
     c.header('X-RateLimit-Reset', new Date(record.resetTime).toISOString())
 
     if (record.count > finalConfig.maxRequests) {
-      c.header('Retry-After', Math.ceil((record.resetTime - now) / 1000).toString())
+      const retryAfterSeconds = Math.ceil((record.resetTime - now) / 1000)
+      c.header('Retry-After', retryAfterSeconds.toString())
       return c.json({ 
         error: 'Rate limit exceeded', 
-        message: 'Too many requests. Please try again later.',
-        retryAfter: record.resetTime - now
+        message: `Too many requests. Please wait ${retryAfterSeconds} seconds before trying again.`,
+        retryAfter: retryAfterSeconds
       }, 429)
     }
 
@@ -68,22 +75,22 @@ export function rateLimiter(config?: Partial<RateLimitConfig>) {
 }
 
 /**
- * Stricter rate limiting for API endpoints
+ * Reasonable rate limiting for API endpoints
  */
 export function apiRateLimiter() {
   return rateLimiter({
-    windowMs: 5 * 60 * 1000, // 5 minutes
-    maxRequests: 20, // 20 requests per 5 minutes for API calls
+    windowMs: 60 * 1000, // 1 minute
+    maxRequests: 10, // 10 requests per minute for API calls
   })
 }
 
 /**
- * Even stricter rate limiting for POST endpoints
+ * Reasonable rate limiting for POST endpoints
  */
 export function postRateLimiter() {
   return rateLimiter({
-    windowMs: 10 * 60 * 1000, // 10 minutes  
-    maxRequests: 5, // 5 POST requests per 10 minutes
+    windowMs: 60 * 1000, // 1 minute  
+    maxRequests: 3, // 3 POST requests per minute (reasonable for form submissions)
   })
 }
 

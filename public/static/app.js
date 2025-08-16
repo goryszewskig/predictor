@@ -112,7 +112,7 @@ async function addPrediction(event) {
     // Check for bot behavior (rapid submissions, suspicious patterns)
     const submissionTime = Date.now();
     const lastSubmission = localStorage.getItem('lastPredictionSubmission');
-    if (lastSubmission && (submissionTime - parseInt(lastSubmission)) < 5000) {
+    if (lastSubmission && (submissionTime - parseInt(lastSubmission)) < 2000) {
         alert('Please wait a moment before submitting another prediction.');
         return;
     }
@@ -315,7 +315,7 @@ async function submitVerification(event) {
     // Check for bot behavior
     const submissionTime = Date.now();
     const lastSubmission = localStorage.getItem('lastVerificationSubmission');
-    if (lastSubmission && (submissionTime - parseInt(lastSubmission)) < 3000) {
+    if (lastSubmission && (submissionTime - parseInt(lastSubmission)) < 2000) {
         alert('Please wait a moment before submitting another verification.');
         return;
     }

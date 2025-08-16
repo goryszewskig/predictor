@@ -32,12 +32,17 @@ app.use('*', behaviorAnalysis())
 
 // Apply global rate limiting (generous for regular browsing)
 app.use('*', rateLimiter({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  maxRequests: 200, // 200 requests per 15 minutes for browsing
+  windowMs: 2 * 60 * 1000, // 2 minutes
+  maxRequests: 50, // 50 requests per 2 minutes for browsing
 }))
 
-// Stricter rate limiting for API routes
-app.use('/api/*', apiRateLimiter())
+// Moderate rate limiting for GET API routes  
+app.use('/api/*', (c, next) => {
+  if (c.req.method === 'GET') {
+    return apiRateLimiter()(c, next)
+  }
+  return next()
+})
 
 // Enable CORS for API routes with restrictions
 app.use('/api/*', cors({
