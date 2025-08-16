@@ -32,8 +32,8 @@ function showAddPrediction() {
     const today = new Date().toISOString().split('T')[0];
     document.getElementById('predicted_date').value = today;
     
-    // Generate new CAPTCHA
-    generateCaptcha();
+    // Track form start time for bot detection
+    window.predictionFormStartTime = Date.now();
 }
 
 function showPredictions() {
@@ -143,13 +143,18 @@ async function addPrediction(event) {
     const form = document.getElementById('prediction-form');
     const formData = new FormData(form);
     
-    // Validate CAPTCHA
-    const userAnswer = formData.get('captcha_answer');
-    const expectedAnswer = formData.get('captcha_expected');
+    // Honeypot validation (should be empty)
+    if (formData.get('website') || formData.get('email_address') || formData.get('full_name')) {
+        // Don't alert - just silently fail for bots
+        console.log('Bot detected via honeypot fields');
+        return;
+    }
     
-    if (!validateCaptcha(userAnswer, expectedAnswer)) {
-        alert('Security check failed. Please solve the math problem correctly.');
-        generateCaptcha(); // Generate new CAPTCHA
+    // Basic form completion time check (too fast = bot)
+    const formStartTime = window.predictionFormStartTime || Date.now();
+    const completionTime = Date.now() - formStartTime;
+    if (completionTime < 3000) { // Less than 3 seconds
+        alert('Please take your time to fill out the form properly.');
         return;
     }
     
@@ -324,7 +329,8 @@ async function openVerificationModal(predictionId) {
         `;
         
         document.getElementById('verify-prediction-id').value = predictionId;
-        generateVerificationCaptcha(); // Generate CAPTCHA for verification form
+        // Track form start time for bot detection
+        window.verificationFormStartTime = Date.now();
         document.getElementById('verification-modal').style.display = 'flex';
     } catch (error) {
         console.error('Error loading prediction details:', error);
@@ -346,13 +352,18 @@ async function submitVerification(event) {
     const formData = new FormData(form);
     const predictionId = formData.get('verify-prediction-id');
     
-    // Validate CAPTCHA
-    const userAnswer = formData.get('captcha_answer');
-    const expectedAnswer = formData.get('captcha_expected');
+    // Honeypot validation (should be empty)
+    if (formData.get('website') || formData.get('email_address') || formData.get('company')) {
+        // Don't alert - just silently fail for bots
+        console.log('Bot detected via honeypot fields in verification');
+        return;
+    }
     
-    if (!validateCaptcha(userAnswer, expectedAnswer)) {
-        alert('Security check failed. Please solve the math problem correctly.');
-        generateVerificationCaptcha(); // Generate new CAPTCHA
+    // Basic form completion time check
+    const formStartTime = window.verificationFormStartTime || Date.now();
+    const completionTime = Date.now() - formStartTime;
+    if (completionTime < 2000) { // Less than 2 seconds
+        alert('Please take your time to fill out the verification properly.');
         return;
     }
     

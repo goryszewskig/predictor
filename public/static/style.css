@@ -345,6 +345,40 @@
   margin-bottom: 20px;
 }
 
+/* Security: Hide honeypot fields completely */
+input[name="website"],
+input[name="email_address"],  
+input[name="full_name"],
+input[name="company"] {
+  position: absolute !important;
+  left: -9999px !important;
+  top: -9999px !important;
+  width: 0 !important;
+  height: 0 !important;
+  opacity: 0 !important;
+  visibility: hidden !important;
+  display: none !important;
+}
+
+/* Rate limiting notice */
+.rate-limit-notice {
+  background-color: #fef3c7;
+  color: #92400e;
+  padding: 10px 15px;
+  border-radius: 5px;
+  margin: 10px 0;
+  border-left: 4px solid #f59e0b;
+}
+
+.security-notice {
+  background-color: #fee2e2;
+  color: #991b1b;
+  padding: 10px 15px;
+  border-radius: 5px;
+  margin: 10px 0;
+  border-left: 4px solid #ef4444;
+}
+
 /* Responsive Design */
 @media (max-width: 768px) {
   .container {

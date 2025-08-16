@@ -1,364 +1,398 @@
 import { Context, Next } from 'hono'
 
-// Rate limiting store (in production, you'd use KV storage or external store)
-interface RateLimitEntry {
-  count: number;
-  windowStart: number;
-  blocked?: boolean;
-  blockUntil?: number;
+// Rate limiting configuration
+interface RateLimitConfig {
+  windowMs: number
+  maxRequests: number
+  keyGenerator: (c: Context) => string
+  skipSuccessfulRequests?: boolean
 }
 
-const rateLimitStore = new Map<string, RateLimitEntry>();
+// In-memory store for rate limiting (in production, use Redis or KV)
+// Note: This will be created per request in Cloudflare Workers environment
+let rateLimitStore: Map<string, { count: number; resetTime: number }>
 
-// Security configuration
-const SECURITY_CONFIG = {
-  // Rate limiting
-  RATE_LIMIT: {
-    WINDOW_MS: 60 * 1000, // 1 minute
-    MAX_REQUESTS: 30, // Max requests per window
-    STRICT_ENDPOINTS: {
-      '/api/predictions': { max: 5, window: 60 * 1000 }, // 5 predictions per minute
-      '/api/predictions/*/verify': { max: 10, window: 60 * 1000 }, // 10 verifications per minute
-    }
-  },
-  
-  // Blocking thresholds
-  BLOCKING: {
-    SUSPICIOUS_THRESHOLD: 100, // Block after 100 requests in window
-    BLOCK_DURATION: 15 * 60 * 1000, // 15 minutes
-  },
-  
-  // Input limits
-  INPUT_LIMITS: {
-    PREDICTION_TEXT_MAX: 2000,
-    PREDICTOR_NAME_MAX: 100,
-    DESCRIPTION_MAX: 500,
-    URL_MAX: 2048,
-    NOTES_MAX: 1000,
-  },
-  
-  // Suspicious patterns
-  SUSPICIOUS_PATTERNS: [
-    /script/i,
-    /<.*>/,
-    /javascript:/i,
-    /vbscript:/i,
-    /onload/i,
-    /onclick/i,
-    /eval\(/i,
-    /expression\(/i,
-  ],
-  
-  // Bot user agents (basic detection)
-  BOT_PATTERNS: [
-    /bot/i,
-    /crawler/i,
-    /spider/i,
-    /scraper/i,
-    /curl/i,
-    /wget/i,
-    /python/i,
-    /requests/i,
-  ],
+function getRateLimitStore() {
+  if (!rateLimitStore) {
+    rateLimitStore = new Map()
+  }
+  return rateLimitStore
 }
 
-// Clean up old entries
-function cleanupRateLimit() {
-  const now = Date.now();
-  for (const [key, entry] of rateLimitStore.entries()) {
-    if (entry.blockUntil && now > entry.blockUntil) {
-      // Remove expired blocks
-      rateLimitStore.delete(key);
-    } else if (now - entry.windowStart > SECURITY_CONFIG.RATE_LIMIT.WINDOW_MS * 2) {
-      // Remove old entries
-      rateLimitStore.delete(key);
+/**
+ * Rate Limiter Middleware
+ */
+export function rateLimiter(config?: Partial<RateLimitConfig>) {
+  const defaultConfig: RateLimitConfig = {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    maxRequests: 100, // requests per window
+    keyGenerator: (c) => {
+      const cf = c.req.raw.cf as any
+      return cf?.colo + ':' + (cf?.clientIP || c.req.header('x-forwarded-for') || 'unknown')
     }
   }
-}
+  
+  const finalConfig = { ...defaultConfig, ...config }
 
-// Rate limiting middleware
-export function rateLimiter(endpoint?: string) {
   return async (c: Context, next: Next) => {
-    const clientIP = c.req.header('CF-Connecting-IP') || 
-                    c.req.header('X-Forwarded-For') || 
-                    c.req.header('X-Real-IP') || 
-                    'unknown';
+    const store = getRateLimitStore()
+    const key = finalConfig.keyGenerator(c)
+    const now = Date.now()
+    const windowStart = now - finalConfig.windowMs
+
+    let record = store.get(key)
     
-    const now = Date.now();
-    const key = `${clientIP}:${endpoint || 'global'}`;
-    
-    // Clean up old entries periodically
-    if (Math.random() < 0.1) {
-      cleanupRateLimit();
+    if (!record || record.resetTime <= now) {
+      record = { count: 0, resetTime: now + finalConfig.windowMs }
+      store.set(key, record)
     }
-    
-    let entry = rateLimitStore.get(key);
-    
-    // Check if IP is currently blocked
-    if (entry?.blocked && entry.blockUntil && now < entry.blockUntil) {
+
+    record.count++
+
+    // Set rate limit headers
+    c.header('X-RateLimit-Limit', finalConfig.maxRequests.toString())
+    c.header('X-RateLimit-Remaining', Math.max(0, finalConfig.maxRequests - record.count).toString())
+    c.header('X-RateLimit-Reset', new Date(record.resetTime).toISOString())
+
+    if (record.count > finalConfig.maxRequests) {
+      c.header('Retry-After', Math.ceil((record.resetTime - now) / 1000).toString())
       return c.json({ 
-        error: 'Too many requests. Please try again later.',
-        retryAfter: Math.ceil((entry.blockUntil - now) / 1000)
-      }, 429);
+        error: 'Rate limit exceeded', 
+        message: 'Too many requests. Please try again later.',
+        retryAfter: record.resetTime - now
+      }, 429)
     }
-    
-    // Get rate limit config for specific endpoint
-    const config = endpoint && SECURITY_CONFIG.RATE_LIMIT.STRICT_ENDPOINTS[endpoint] 
-      ? SECURITY_CONFIG.RATE_LIMIT.STRICT_ENDPOINTS[endpoint]
-      : { max: SECURITY_CONFIG.RATE_LIMIT.MAX_REQUESTS, window: SECURITY_CONFIG.RATE_LIMIT.WINDOW_MS };
-    
-    // Initialize or update rate limit entry
-    if (!entry || (now - entry.windowStart) > config.window) {
-      entry = {
-        count: 1,
-        windowStart: now,
-        blocked: false
-      };
-    } else {
-      entry.count++;
-    }
-    
-    rateLimitStore.set(key, entry);
-    
-    // Check if limit exceeded
-    if (entry.count > config.max) {
-      // Block for suspicious activity
-      if (entry.count > SECURITY_CONFIG.BLOCKING.SUSPICIOUS_THRESHOLD) {
-        entry.blocked = true;
-        entry.blockUntil = now + SECURITY_CONFIG.BLOCKING.BLOCK_DURATION;
-        rateLimitStore.set(key, entry);
-        
-        console.log(`IP ${clientIP} blocked for suspicious activity: ${entry.count} requests`);
-        
-        return c.json({ 
-          error: 'Suspicious activity detected. Access temporarily blocked.',
-          retryAfter: SECURITY_CONFIG.BLOCKING.BLOCK_DURATION / 1000
-        }, 429);
-      }
-      
-      return c.json({ 
-        error: 'Rate limit exceeded. Please slow down.',
-        limit: config.max,
-        window: config.window / 1000,
-        retryAfter: Math.ceil((entry.windowStart + config.window - now) / 1000)
-      }, 429);
-    }
-    
-    // Add rate limit headers
-    c.header('X-RateLimit-Limit', config.max.toString());
-    c.header('X-RateLimit-Remaining', (config.max - entry.count).toString());
-    c.header('X-RateLimit-Reset', Math.ceil((entry.windowStart + config.window) / 1000).toString());
-    
-    await next();
+
+    await next()
   }
 }
 
-// Input validation and sanitization
-export function validateInput(data: any, type: 'prediction' | 'verification'): { isValid: boolean; errors: string[]; sanitized?: any } {
-  const errors: string[] = [];
-  const sanitized: any = {};
-  
-  // Common validation
-  function sanitizeString(str: string, maxLength: number, fieldName: string): string {
-    if (!str) return '';
-    
-    // Check for suspicious patterns
-    for (const pattern of SECURITY_CONFIG.SUSPICIOUS_PATTERNS) {
-      if (pattern.test(str)) {
-        errors.push(`${fieldName} contains potentially malicious content`);
-        return '';
-      }
-    }
-    
-    // Trim and limit length
-    const cleaned = str.trim().substring(0, maxLength);
-    
-    // Basic HTML escape (additional to prevent XSS)
-    return cleaned
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
-  }
-  
-  function validateURL(url: string): boolean {
-    if (!url) return true; // Optional field
-    try {
-      const urlObj = new URL(url);
-      return ['http:', 'https:'].includes(urlObj.protocol);
-    } catch {
-      return false;
-    }
-  }
-  
-  if (type === 'prediction') {
-    // Validate prediction data
-    const { predictor_name, prediction_text, predicted_date, target_date, target_description, category, confidence_level, source_url, notes } = data;
-    
-    // Required fields
-    if (!predictor_name?.trim()) errors.push('Predictor name is required');
-    if (!prediction_text?.trim()) errors.push('Prediction text is required');
-    if (!predicted_date) errors.push('Predicted date is required');
-    
-    // Sanitize and validate
-    sanitized.predictor_name = sanitizeString(predictor_name, SECURITY_CONFIG.INPUT_LIMITS.PREDICTOR_NAME_MAX, 'Predictor name');
-    sanitized.prediction_text = sanitizeString(prediction_text, SECURITY_CONFIG.INPUT_LIMITS.PREDICTION_TEXT_MAX, 'Prediction text');
-    sanitized.target_description = sanitizeString(target_description, SECURITY_CONFIG.INPUT_LIMITS.DESCRIPTION_MAX, 'Target description');
-    sanitized.notes = sanitizeString(notes, SECURITY_CONFIG.INPUT_LIMITS.NOTES_MAX, 'Notes');
-    
-    // Date validation
-    const predDate = new Date(predicted_date);
-    const targetDate = target_date ? new Date(target_date) : null;
-    
-    if (isNaN(predDate.getTime())) errors.push('Invalid predicted date');
-    if (predDate > new Date()) errors.push('Predicted date cannot be in the future');
-    if (targetDate && isNaN(targetDate.getTime())) errors.push('Invalid target date');
-    if (targetDate && targetDate <= predDate) errors.push('Target date must be after predicted date');
-    
-    sanitized.predicted_date = predicted_date;
-    sanitized.target_date = target_date;
-    
-    // Category validation
-    const validCategories = ['general', 'technology', 'economics', 'politics', 'climate', 'sports', 'health', 'society', 'science'];
-    sanitized.category = validCategories.includes(category) ? category : 'general';
-    
-    // Confidence level validation
-    const confidence = parseInt(confidence_level);
-    if (isNaN(confidence) || confidence < 1 || confidence > 10) {
-      errors.push('Confidence level must be between 1 and 10');
-    }
-    sanitized.confidence_level = Math.max(1, Math.min(10, confidence || 5));
-    
-    // URL validation
-    if (source_url && !validateURL(source_url)) {
-      errors.push('Invalid source URL');
-    } else {
-      sanitized.source_url = source_url;
-    }
-    
-  } else if (type === 'verification') {
-    // Validate verification data
-    const { outcome, outcome_description, evidence_url, verified_by, confidence_score, notes } = data;
-    
-    // Required fields
-    if (!outcome) errors.push('Outcome is required');
-    if (!outcome_description?.trim()) errors.push('Outcome description is required');
-    if (!verified_by?.trim()) errors.push('Verified by is required');
-    
-    // Sanitize and validate
-    sanitized.outcome_description = sanitizeString(outcome_description, SECURITY_CONFIG.INPUT_LIMITS.DESCRIPTION_MAX, 'Outcome description');
-    sanitized.verified_by = sanitizeString(verified_by, SECURITY_CONFIG.INPUT_LIMITS.PREDICTOR_NAME_MAX, 'Verified by');
-    sanitized.notes = sanitizeString(notes, SECURITY_CONFIG.INPUT_LIMITS.NOTES_MAX, 'Verification notes');
-    
-    // Outcome validation
-    const validOutcomes = ['correct', 'incorrect', 'partially_correct', 'too_early', 'unprovable'];
-    if (!validOutcomes.includes(outcome)) {
-      errors.push('Invalid outcome value');
-    }
-    sanitized.outcome = outcome;
-    
-    // Confidence score validation
-    const confidence = parseInt(confidence_score);
-    if (isNaN(confidence) || confidence < 1 || confidence > 10) {
-      errors.push('Confidence score must be between 1 and 10');
-    }
-    sanitized.confidence_score = Math.max(1, Math.min(10, confidence || 5));
-    
-    // URL validation
-    if (evidence_url && !validateURL(evidence_url)) {
-      errors.push('Invalid evidence URL');
-    } else {
-      sanitized.evidence_url = evidence_url;
-    }
-  }
-  
-  return {
-    isValid: errors.length === 0,
-    errors,
-    sanitized: errors.length === 0 ? sanitized : undefined
-  };
+/**
+ * Stricter rate limiting for API endpoints
+ */
+export function apiRateLimiter() {
+  return rateLimiter({
+    windowMs: 5 * 60 * 1000, // 5 minutes
+    maxRequests: 20, // 20 requests per 5 minutes for API calls
+  })
 }
 
-// Bot detection middleware
-export function botDetection() {
-  return async (c: Context, next: Next) => {
-    const userAgent = c.req.header('User-Agent') || '';
-    
-    // Check for bot patterns
-    for (const pattern of SECURITY_CONFIG.BOT_PATTERNS) {
-      if (pattern.test(userAgent)) {
-        console.log(`Bot detected: ${userAgent}`);
-        return c.json({ error: 'Automated requests are not allowed' }, 403);
-      }
-    }
-    
-    // Check for missing user agent (suspicious)
-    if (!userAgent.trim()) {
-      console.log('Request with missing User-Agent');
-      return c.json({ error: 'Invalid request' }, 400);
-    }
-    
-    await next();
-  }
+/**
+ * Even stricter rate limiting for POST endpoints
+ */
+export function postRateLimiter() {
+  return rateLimiter({
+    windowMs: 10 * 60 * 1000, // 10 minutes  
+    maxRequests: 5, // 5 POST requests per 10 minutes
+  })
 }
 
-// Request size limiting middleware
-export function requestSizeLimit(maxSize: number = 50 * 1024) { // 50KB default
-  return async (c: Context, next: Next) => {
-    const contentLength = c.req.header('Content-Length');
-    
-    if (contentLength && parseInt(contentLength) > maxSize) {
-      return c.json({ 
-        error: 'Request too large',
-        maxSize: maxSize,
-        received: contentLength
-      }, 413);
-    }
-    
-    await next();
-  }
-}
-
-// Honeypot validation (to be used with frontend)
-export function validateHoneypot(honeypotValue: any): boolean {
-  // Honeypot fields should always be empty
-  return !honeypotValue || honeypotValue === '';
-}
-
-// CAPTCHA validation
-export function validateCaptcha(userAnswer: any, expectedAnswer: any): boolean {
-  const userNum = parseInt(userAnswer);
-  const expectedNum = parseInt(expectedAnswer);
-  
-  if (isNaN(userNum) || isNaN(expectedNum)) {
-    return false;
-  }
-  
-  return userNum === expectedNum;
-}
-
-// CORS security middleware
+/**
+ * Security Headers Middleware
+ */
 export function securityHeaders() {
   return async (c: Context, next: Next) => {
     // Security headers
-    c.header('X-Content-Type-Options', 'nosniff');
-    c.header('X-Frame-Options', 'DENY');
-    c.header('X-XSS-Protection', '1; mode=block');
-    c.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+    c.header('X-Content-Type-Options', 'nosniff')
+    c.header('X-Frame-Options', 'DENY')
+    c.header('X-XSS-Protection', '1; mode=block')
+    c.header('Referrer-Policy', 'strict-origin-when-cross-origin')
+    c.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
     
-    // Only for HTML responses
-    if (c.req.path === '/' || !c.req.path.startsWith('/api/')) {
-      c.header('Content-Security-Policy', 
-        "default-src 'self'; " +
-        "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://www.googletagmanager.com https://www.google-analytics.com; " +
-        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " +
-        "font-src 'self' https://cdn.jsdelivr.net; " +
-        "img-src 'self' data: https:; " +
-        "connect-src 'self' https://www.google-analytics.com;"
-      );
+    // CSP header
+    const csp = [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://www.googletagmanager.com https://www.google-analytics.com",
+      "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net",
+      "font-src 'self' https://cdn.jsdelivr.net",
+      "img-src 'self' data: https: http:",
+      "connect-src 'self' https://www.google-analytics.com https://analytics.google.com",
+      "frame-ancestors 'none'",
+      "base-uri 'self'",
+      "form-action 'self'"
+    ].join('; ')
+    
+    c.header('Content-Security-Policy', csp)
+
+    await next()
+  }
+}
+
+/**
+ * Bot Detection Middleware
+ */
+export function botDetection() {
+  const suspiciousUserAgents = [
+    /bot/i, /crawler/i, /spider/i, /scraper/i,
+    /curl/i, /wget/i, /python/i, /java/i,
+    /perl/i, /php/i, /ruby/i, /go-http/i,
+    /postman/i, /insomnia/i, /httpie/i
+  ]
+
+  const suspiciousHeaders = [
+    'x-forwarded-for', 'x-real-ip', 'x-originating-ip'
+  ]
+
+  return async (c: Context, next: Next) => {
+    const userAgent = c.req.header('user-agent') || ''
+    const cf = c.req.raw.cf as any
+
+    // Check for suspicious user agents
+    if (suspiciousUserAgents.some(pattern => pattern.test(userAgent))) {
+      // Allow some legitimate bots but rate limit them heavily
+      if (!/googlebot|bingbot|slurp/i.test(userAgent)) {
+        return c.json({ 
+          error: 'Access denied',
+          message: 'Automated requests are not allowed'
+        }, 403)
+      }
     }
+
+    // Check for missing or suspicious headers
+    if (!userAgent || userAgent.length < 10) {
+      return c.json({
+        error: 'Access denied',
+        message: 'Invalid user agent'
+      }, 403)
+    }
+
+    // Check for too many proxy headers (potential bot farm)
+    const proxyHeaders = suspiciousHeaders.filter(header => c.req.header(header))
+    if (proxyHeaders.length > 2) {
+      return c.json({
+        error: 'Access denied', 
+        message: 'Suspicious request headers'
+      }, 403)
+    }
+
+    // Cloudflare bot score check (if available)
+    if (cf && cf.botManagement && cf.botManagement.score < 30) {
+      return c.json({
+        error: 'Access denied',
+        message: 'Automated traffic detected'
+      }, 403)
+    }
+
+    await next()
+  }
+}
+
+/**
+ * Input Validation Middleware
+ */
+export function validateInput() {
+  return async (c: Context, next: Next) => {
+    if (c.req.method === 'POST') {
+      try {
+        const body = await c.req.json()
+        
+        // Check for common injection patterns
+        const dangerousPatterns = [
+          /<script/i, /javascript:/i, /on\w+=/i,
+          /union.*select/i, /drop.*table/i, /delete.*from/i,
+          /insert.*into/i, /update.*set/i, /--/,
+          /\/\*.*\*\//,  /eval\(/i, /exec\(/i
+        ]
+
+        const checkValue = (value: any): boolean => {
+          if (typeof value === 'string') {
+            return dangerousPatterns.some(pattern => pattern.test(value))
+          }
+          if (typeof value === 'object' && value !== null) {
+            return Object.values(value).some(checkValue)
+          }
+          return false
+        }
+
+        if (checkValue(body)) {
+          return c.json({
+            error: 'Invalid input',
+            message: 'Potentially malicious content detected'
+          }, 400)
+        }
+
+        // Length checks
+        Object.entries(body).forEach(([key, value]) => {
+          if (typeof value === 'string') {
+            if (key === 'prediction_text' && value.length > 1000) {
+              throw new Error('Prediction text too long')
+            }
+            if (key === 'outcome_description' && value.length > 2000) {
+              throw new Error('Outcome description too long')
+            }
+            if (key === 'predictor_name' && value.length > 100) {
+              throw new Error('Predictor name too long')
+            }
+            if (value.length > 5000) {
+              throw new Error('Input field too long')
+            }
+          }
+        })
+
+      } catch (error) {
+        return c.json({
+          error: 'Invalid input',
+          message: error instanceof Error ? error.message : 'Invalid request format'
+        }, 400)
+      }
+    }
+
+    await next()
+  }
+}
+
+/**
+ * Request Size Limiter
+ */
+export function requestSizeLimit(maxSize: number = 50 * 1024) { // 50KB default
+  return async (c: Context, next: Next) => {
+    const contentLength = c.req.header('content-length')
     
-    await next();
+    if (contentLength && parseInt(contentLength) > maxSize) {
+      return c.json({
+        error: 'Request too large',
+        message: `Request size exceeds ${maxSize} bytes limit`
+      }, 413)
+    }
+
+    await next()
+  }
+}
+
+/**
+ * Honeypot Field Validation (for forms)
+ */
+export function validateHoneypot() {
+  return async (c: Context, next: Next) => {
+    if (c.req.method === 'POST') {
+      try {
+        const body = await c.req.json()
+        
+        // Check honeypot fields (should be empty)
+        if (body.website || body.phone || body.address) {
+          return c.json({
+            error: 'Bot detected',
+            message: 'Automated submission detected'
+          }, 403)
+        }
+      } catch (error) {
+        // If parsing fails, let it continue to be handled by other middleware
+      }
+    }
+
+    await next()
+  }
+}
+
+/**
+ * Simple CAPTCHA-like validation
+ */
+export function validateCaptcha() {
+  return async (c: Context, next: Next) => {
+    if (c.req.method === 'POST') {
+      try {
+        const body = await c.req.json()
+        
+        // Simple math captcha validation
+        if (body.captcha_answer) {
+          const expectedAnswer = c.req.header('x-captcha-token')
+          if (body.captcha_answer !== expectedAnswer) {
+            return c.json({
+              error: 'CAPTCHA verification failed',
+              message: 'Please solve the CAPTCHA correctly'
+            }, 400)
+          }
+        }
+      } catch (error) {
+        // Continue if parsing fails
+      }
+    }
+
+    await next()
+  }
+}
+
+/**
+ * IP Whitelist/Blacklist (optional)
+ */
+export function ipFilter(whitelist?: string[], blacklist?: string[]) {
+  return async (c: Context, next: Next) => {
+    const cf = c.req.raw.cf as any
+    const clientIP = cf?.clientIP || c.req.header('x-forwarded-for') || c.req.header('x-real-ip')
+
+    if (blacklist && clientIP && blacklist.includes(clientIP)) {
+      return c.json({
+        error: 'Access denied',
+        message: 'Your IP address is blocked'
+      }, 403)
+    }
+
+    if (whitelist && whitelist.length > 0 && clientIP && !whitelist.includes(clientIP)) {
+      return c.json({
+        error: 'Access denied',
+        message: 'Your IP address is not authorized'
+      }, 403)
+    }
+
+    await next()
+  }
+}
+
+/**
+ * Suspicious behavior detection
+ */
+let suspiciousActivities: Map<string, { actions: string[]; timestamps: number[] }>
+
+function getSuspiciousActivitiesStore() {
+  if (!suspiciousActivities) {
+    suspiciousActivities = new Map()
+  }
+  return suspiciousActivities
+}
+
+export function behaviorAnalysis() {
+  return async (c: Context, next: Next) => {
+    const store = getSuspiciousActivitiesStore()
+    const cf = c.req.raw.cf as any
+    const clientIP = cf?.clientIP || c.req.header('x-forwarded-for') || 'unknown'
+    const now = Date.now()
+    const fiveMinutesAgo = now - 5 * 60 * 1000
+
+    if (!store.has(clientIP)) {
+      store.set(clientIP, { actions: [], timestamps: [] })
+    }
+
+    const activity = store.get(clientIP)!
+    
+    // Clean old timestamps
+    activity.timestamps = activity.timestamps.filter(t => t > fiveMinutesAgo)
+    activity.actions = activity.actions.slice(-10) // Keep last 10 actions
+
+    // Record current action
+    activity.actions.push(c.req.method + ' ' + c.req.path)
+    activity.timestamps.push(now)
+
+    // Check for suspicious patterns
+    const recentRequests = activity.timestamps.length
+    const uniqueActions = new Set(activity.actions).size
+
+    // Too many requests with too few unique actions (potential bot)
+    if (recentRequests > 30 && uniqueActions < 3) {
+      return c.json({
+        error: 'Suspicious activity detected',
+        message: 'Please wait before making more requests'
+      }, 429)
+    }
+
+    // Too many POST requests in short time
+    const recentPosts = activity.actions.filter(action => action.startsWith('POST')).length
+    if (recentPosts > 10) {
+      return c.json({
+        error: 'Too many submissions',
+        message: 'Please slow down your submissions'
+      }, 429)
+    }
+
+    await next()
   }
 }

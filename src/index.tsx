@@ -9,7 +9,9 @@ import {
   requestSizeLimit, 
   securityHeaders,
   validateHoneypot,
-  validateCaptcha
+  apiRateLimiter,
+  postRateLimiter,
+  behaviorAnalysis
 } from './security'
 
 // Type definitions for Cloudflare bindings
@@ -25,19 +27,39 @@ app.use('*', securityHeaders())
 // Apply bot detection to all routes
 app.use('*', botDetection())
 
-// Apply global rate limiting
-app.use('*', rateLimiter())
+// Apply behavior analysis
+app.use('*', behaviorAnalysis())
+
+// Apply global rate limiting (generous for regular browsing)
+app.use('*', rateLimiter({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  maxRequests: 200, // 200 requests per 15 minutes for browsing
+}))
+
+// Stricter rate limiting for API routes
+app.use('/api/*', apiRateLimiter())
 
 // Enable CORS for API routes with restrictions
 app.use('/api/*', cors({
-  origin: ['https://prediction-tracker.pages.dev', 'https://*.prediction-tracker.pages.dev'],
+  origin: (origin) => {
+    // Allow same origin and prediction-tracker.pages.dev subdomains
+    if (!origin) return true // Allow requests without origin (same-origin)
+    return origin.includes('prediction-tracker.pages.dev') || 
+           origin === 'https://prediction-tracker.pages.dev'
+  },
   allowMethods: ['GET', 'POST'],
-  allowHeaders: ['Content-Type', 'Authorization'],
+  allowHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   maxAge: 86400,
 }))
 
 // Request size limiting for API routes
-app.use('/api/*', requestSizeLimit(100 * 1024)) // 100KB limit
+app.use('/api/*', requestSizeLimit(50 * 1024)) // 50KB limit
+
+// Input validation for all POST routes
+app.use('*', validateInput())
+
+// Honeypot validation for forms
+app.use('/api/predictions*', validateHoneypot())
 
 // Serve static files from public directory
 app.use('/static/*', serveStatic({ root: './public' }))
@@ -63,6 +85,13 @@ app.get('/', (c) => {
         <div id="add-prediction" className="section" style="display: none;">
           <h2>Add New Prediction</h2>
           <form id="prediction-form" onsubmit="addPrediction(event)">
+            {/* Honeypot fields - hidden from users but visible to bots */}
+            <div style="display: none;">
+              <input type="text" name="website" tabindex="-1" autocomplete="off" />
+              <input type="email" name="email_address" tabindex="-1" autocomplete="off" />
+              <input type="text" name="full_name" tabindex="-1" autocomplete="off" />
+            </div>
+            
             <div className="form-group">
               <label htmlFor="predictor_name">Predictor Name:</label>
               <input type="text" id="predictor_name" name="predictor_name" required />
@@ -178,6 +207,13 @@ app.get('/', (c) => {
             <div id="prediction-details"></div>
             <form id="verification-form" onsubmit="submitVerification(event)">
               <input type="hidden" id="verify-prediction-id" />
+              
+              {/* Honeypot fields - hidden from users but visible to bots */}
+              <div style="display: none;">
+                <input type="text" name="website" tabindex="-1" autocomplete="off" />
+                <input type="email" name="email_address" tabindex="-1" autocomplete="off" />
+                <input type="text" name="company" tabindex="-1" autocomplete="off" />
+              </div>
               
               <div className="form-group">
                 <label htmlFor="outcome">Outcome:</label>
@@ -327,45 +363,39 @@ app.get('/api/predictions/:id', async (c) => {
   }
 })
 
-// Add new prediction
-app.post('/api/predictions', rateLimiter('/api/predictions'), async (c) => {
+// Add new prediction (with strict rate limiting)
+app.post('/api/predictions', postRateLimiter(), async (c) => {
   const { env } = c
   
   try {
     const body = await c.req.json()
-    
-    // Check honeypot fields
-    if (!validateHoneypot(body.website) || !validateHoneypot(body.email_address) || !validateHoneypot(body.full_name)) {
-      console.log('Bot detected via honeypot in predictions endpoint');
-      return c.json({ error: 'Invalid request' }, 400);
-    }
-    
-    // Validate CAPTCHA
-    if (!validateCaptcha(body.captcha_answer, body.captcha_expected)) {
-      console.log('CAPTCHA validation failed in predictions endpoint');
-      return c.json({ error: 'Security verification failed' }, 400);
-    }
-    
-    // Validate and sanitize input
-    const validation = validateInput(body, 'prediction');
-    if (!validation.isValid) {
-      return c.json({ 
-        error: 'Validation failed', 
-        details: validation.errors 
-      }, 400);
-    }
-    
     const {
       predictor_name,
       prediction_text,
       predicted_date,
       target_date,
       target_description,
-      category,
+      category = 'general',
       confidence_level,
       source_url,
       notes
-    } = validation.sanitized!
+    } = body
+    
+    // Additional validation for required fields
+    if (!predictor_name || !prediction_text || !predicted_date) {
+      return c.json({ 
+        error: 'Missing required fields', 
+        message: 'Predictor name, prediction text, and predicted date are required' 
+      }, 400)
+    }
+    
+    // Validate confidence level
+    if (confidence_level && (confidence_level < 1 || confidence_level > 10)) {
+      return c.json({ 
+        error: 'Invalid confidence level', 
+        message: 'Confidence level must be between 1 and 10' 
+      }, 400)
+    }
     
     const { success, meta } = await env.DB.prepare(`
       INSERT INTO predictions 
@@ -379,7 +409,7 @@ app.post('/api/predictions', rateLimiter('/api/predictions'), async (c) => {
       target_date || null,
       target_description || null,
       category,
-      confidence_level,
+      confidence_level || null,
       source_url || null,
       notes || null
     ).run()
@@ -395,41 +425,19 @@ app.post('/api/predictions', rateLimiter('/api/predictions'), async (c) => {
   }
 })
 
-// Add verification for a prediction
-app.post('/api/predictions/:id/verify', rateLimiter('/api/predictions/*/verify'), async (c) => {
+// Add verification for a prediction (with strict rate limiting)
+app.post('/api/predictions/:id/verify', postRateLimiter(), async (c) => {
   const { env } = c
   const predictionId = c.req.param('id')
   
   // Validate prediction ID
-  const idNum = parseInt(predictionId);
+  const idNum = parseInt(predictionId)
   if (isNaN(idNum) || idNum <= 0) {
-    return c.json({ error: 'Invalid prediction ID' }, 400);
+    return c.json({ error: 'Invalid prediction ID' }, 400)
   }
   
   try {
     const body = await c.req.json()
-    
-    // Check honeypot fields
-    if (!validateHoneypot(body.website) || !validateHoneypot(body.email_address) || !validateHoneypot(body.company)) {
-      console.log('Bot detected via honeypot in verification endpoint');
-      return c.json({ error: 'Invalid request' }, 400);
-    }
-    
-    // Validate CAPTCHA  
-    if (!validateCaptcha(body.captcha_answer, body.captcha_expected)) {
-      console.log('CAPTCHA validation failed in verification endpoint');
-      return c.json({ error: 'Security verification failed' }, 400);
-    }
-    
-    // Validate and sanitize input
-    const validation = validateInput(body, 'verification');
-    if (!validation.isValid) {
-      return c.json({ 
-        error: 'Validation failed', 
-        details: validation.errors 
-      }, 400);
-    }
-    
     const {
       outcome,
       outcome_description,
@@ -437,7 +445,44 @@ app.post('/api/predictions/:id/verify', rateLimiter('/api/predictions/*/verify')
       verified_by,
       confidence_score,
       notes
-    } = validation.sanitized!
+    } = body
+    
+    // Validate required fields
+    if (!outcome || !outcome_description || !verified_by) {
+      return c.json({ 
+        error: 'Missing required fields', 
+        message: 'Outcome, description, and verifier name are required' 
+      }, 400)
+    }
+    
+    // Validate outcome value
+    const validOutcomes = ['correct', 'incorrect', 'partially_correct', 'too_early', 'unprovable']
+    if (!validOutcomes.includes(outcome)) {
+      return c.json({ 
+        error: 'Invalid outcome', 
+        message: 'Outcome must be one of: ' + validOutcomes.join(', ') 
+      }, 400)
+    }
+    
+    // Validate confidence score
+    if (confidence_score && (confidence_score < 1 || confidence_score > 10)) {
+      return c.json({ 
+        error: 'Invalid confidence score', 
+        message: 'Confidence score must be between 1 and 10' 
+      }, 400)
+    }
+    
+    // Check if prediction exists
+    const prediction = await env.DB.prepare('SELECT id FROM predictions WHERE id = ?').bind(predictionId).first()
+    if (!prediction) {
+      return c.json({ error: 'Prediction not found' }, 404)
+    }
+    
+    // Check if already verified
+    const existingVerification = await env.DB.prepare('SELECT id FROM verifications WHERE prediction_id = ?').bind(predictionId).first()
+    if (existingVerification) {
+      return c.json({ error: 'Prediction already verified' }, 400)
+    }
     
     const { success, meta } = await env.DB.prepare(`
       INSERT INTO verifications 
@@ -449,7 +494,7 @@ app.post('/api/predictions/:id/verify', rateLimiter('/api/predictions/*/verify')
       outcome_description,
       evidence_url || null,
       verified_by,
-      confidence_score,
+      confidence_score || null,
       notes || null
     ).run()
     
