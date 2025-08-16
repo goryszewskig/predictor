@@ -11,9 +11,6 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Show predictions by default
     showPredictions();
-    
-    // Generate initial CAPTCHA
-    generateCaptcha();
 });
 
 // Navigation functions
@@ -57,53 +54,7 @@ function updateVerificationConfidenceLabel(value) {
     document.getElementById('verification-confidence-label').textContent = value;
 }
 
-// CAPTCHA generation and validation
-function generateCaptcha() {
-    const num1 = Math.floor(Math.random() * 20) + 1;
-    const num2 = Math.floor(Math.random() * 20) + 1;
-    const operations = ['+', '-', '*'];
-    const operation = operations[Math.floor(Math.random() * operations.length)];
-    
-    let question, answer;
-    
-    switch(operation) {
-        case '+':
-            question = `${num1} + ${num2}`;
-            answer = num1 + num2;
-            break;
-        case '-':
-            // Ensure positive result
-            const larger = Math.max(num1, num2);
-            const smaller = Math.min(num1, num2);
-            question = `${larger} - ${smaller}`;
-            answer = larger - smaller;
-            break;
-        case '*':
-            // Use smaller numbers for multiplication
-            const small1 = Math.floor(Math.random() * 10) + 1;
-            const small2 = Math.floor(Math.random() * 10) + 1;
-            question = `${small1} × ${small2}`;
-            answer = small1 * small2;
-            break;
-    }
-    
-    document.getElementById('captcha-question').textContent = question;
-    document.getElementById('captcha_expected').value = answer;
-}
-
-function generateVerificationCaptcha() {
-    const num1 = Math.floor(Math.random() * 15) + 1;
-    const num2 = Math.floor(Math.random() * 15) + 1;
-    const question = `${num1} + ${num2}`;
-    const answer = num1 + num2;
-    
-    document.getElementById('verify-captcha-question').textContent = question;
-    document.getElementById('verify_captcha_expected').value = answer;
-}
-
-function validateCaptcha(userAnswer, expectedAnswer) {
-    return parseInt(userAnswer) === parseInt(expectedAnswer);
-}
+// Security and validation functions
 
 // Rate limiting and error handling
 function handleApiError(error) {
@@ -176,10 +127,7 @@ async function addPrediction(event) {
         category: formData.get('category'),
         confidence_level: parseInt(formData.get('confidence_level')),
         source_url: formData.get('source_url') || null,
-        notes: formData.get('notes') || null,
-        // Include CAPTCHA validation
-        captcha_answer: userAnswer,
-        captcha_expected: expectedAnswer
+        notes: formData.get('notes') || null
     };
     
     try {
@@ -190,16 +138,13 @@ async function addPrediction(event) {
             form.reset();
             document.getElementById('predicted_date').value = new Date().toISOString().split('T')[0];
             document.getElementById('confidence-label').textContent = '5';
-            generateCaptcha(); // Generate new CAPTCHA
             showPredictions(); // Switch to predictions view
         } else {
             alert('Error adding prediction: ' + (response.data.error || 'Unknown error'));
-            generateCaptcha(); // Generate new CAPTCHA
         }
     } catch (error) {
         const errorMessage = handleApiError(error);
         alert('Error adding prediction: ' + errorMessage);
-        generateCaptcha(); // Generate new CAPTCHA
     }
 }
 
@@ -382,10 +327,7 @@ async function submitVerification(event) {
         evidence_url: formData.get('evidence_url') || null,
         verified_by: formData.get('verified_by'),
         confidence_score: parseInt(formData.get('confidence_score')),
-        notes: formData.get('verification_notes') || null,
-        // Include CAPTCHA validation
-        captcha_answer: userAnswer,
-        captcha_expected: expectedAnswer
+        notes: formData.get('verification_notes') || null
     };
     
     try {
@@ -397,12 +339,10 @@ async function submitVerification(event) {
             loadPredictions(); // Refresh the predictions list
         } else {
             alert('Error submitting verification: ' + (response.data.error || 'Unknown error'));
-            generateVerificationCaptcha(); // Generate new CAPTCHA
         }
     } catch (error) {
         const errorMessage = handleApiError(error);
         alert('Error submitting verification: ' + errorMessage);
-        generateVerificationCaptcha(); // Generate new CAPTCHA
     }
 }
 

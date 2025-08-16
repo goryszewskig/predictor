@@ -150,19 +150,7 @@ app.get('/', (c) => {
               <textarea id="notes" name="notes" rows="2"></textarea>
             </div>
             
-            {/* Simple Math CAPTCHA */}
-            <div className="form-group">
-              <label htmlFor="captcha_answer">Security Check: What is <span id="captcha-question"></span>?</label>
-              <input type="number" id="captcha_answer" name="captcha_answer" required />
-              <input type="hidden" id="captcha_expected" name="captcha_expected" />
-            </div>
-            
-            {/* Honeypot fields - hidden from users, should remain empty */}
-            <div style="position: absolute; left: -9999px; opacity: 0; pointer-events: none;">
-              <input type="text" name="website" tabindex="-1" autocomplete="off" />
-              <input type="email" name="email_address" tabindex="-1" autocomplete="off" />
-              <input type="text" name="full_name" tabindex="-1" autocomplete="off" />
-            </div>
+
             
             <button type="submit" className="btn btn-success">Add Prediction</button>
           </form>
@@ -254,19 +242,7 @@ app.get('/', (c) => {
                 <textarea id="verification_notes" name="verification_notes" rows="2"></textarea>
               </div>
               
-              {/* Simple Math CAPTCHA */}
-              <div className="form-group">
-                <label htmlFor="verify_captcha_answer">Security Check: What is <span id="verify-captcha-question"></span>?</label>
-                <input type="number" id="verify_captcha_answer" name="captcha_answer" required />
-                <input type="hidden" id="verify_captcha_expected" name="captcha_expected" />
-              </div>
-              
-              {/* Honeypot fields - hidden from users, should remain empty */}
-              <div style="position: absolute; left: -9999px; opacity: 0; pointer-events: none;">
-                <input type="text" name="website" tabindex="-1" autocomplete="off" />
-                <input type="email" name="email_address" tabindex="-1" autocomplete="off" />
-                <input type="text" name="company" tabindex="-1" autocomplete="off" />
-              </div>
+
               
               <button type="submit" className="btn btn-success">Submit Verification</button>
             </form>
