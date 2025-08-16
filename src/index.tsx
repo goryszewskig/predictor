@@ -2,6 +2,15 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { serveStatic } from 'hono/cloudflare-workers'
 import { renderer } from './renderer'
+import { 
+  rateLimiter, 
+  validateInput, 
+  botDetection, 
+  requestSizeLimit, 
+  securityHeaders,
+  validateHoneypot,
+  validateCaptcha
+} from './security'
 
 // Type definitions for Cloudflare bindings
 type Bindings = {
@@ -10,8 +19,25 @@ type Bindings = {
 
 const app = new Hono<{ Bindings: Bindings }>()
 
-// Enable CORS for API routes
-app.use('/api/*', cors())
+// Apply security headers globally
+app.use('*', securityHeaders())
+
+// Apply bot detection to all routes
+app.use('*', botDetection())
+
+// Apply global rate limiting
+app.use('*', rateLimiter())
+
+// Enable CORS for API routes with restrictions
+app.use('/api/*', cors({
+  origin: ['https://prediction-tracker.pages.dev', 'https://*.prediction-tracker.pages.dev'],
+  allowMethods: ['GET', 'POST'],
+  allowHeaders: ['Content-Type', 'Authorization'],
+  maxAge: 86400,
+}))
+
+// Request size limiting for API routes
+app.use('/api/*', requestSizeLimit(100 * 1024)) // 100KB limit
 
 // Serve static files from public directory
 app.use('/static/*', serveStatic({ root: './public' }))
@@ -95,6 +121,20 @@ app.get('/', (c) => {
               <textarea id="notes" name="notes" rows="2"></textarea>
             </div>
             
+            {/* Simple Math CAPTCHA */}
+            <div className="form-group">
+              <label htmlFor="captcha_answer">Security Check: What is <span id="captcha-question"></span>?</label>
+              <input type="number" id="captcha_answer" name="captcha_answer" required />
+              <input type="hidden" id="captcha_expected" name="captcha_expected" />
+            </div>
+            
+            {/* Honeypot fields - hidden from users, should remain empty */}
+            <div style="position: absolute; left: -9999px; opacity: 0; pointer-events: none;">
+              <input type="text" name="website" tabindex="-1" autocomplete="off" />
+              <input type="email" name="email_address" tabindex="-1" autocomplete="off" />
+              <input type="text" name="full_name" tabindex="-1" autocomplete="off" />
+            </div>
+            
             <button type="submit" className="btn btn-success">Add Prediction</button>
           </form>
         </div>
@@ -176,6 +216,20 @@ app.get('/', (c) => {
               <div className="form-group">
                 <label htmlFor="verification_notes">Verification Notes:</label>
                 <textarea id="verification_notes" name="verification_notes" rows="2"></textarea>
+              </div>
+              
+              {/* Simple Math CAPTCHA */}
+              <div className="form-group">
+                <label htmlFor="verify_captcha_answer">Security Check: What is <span id="verify-captcha-question"></span>?</label>
+                <input type="number" id="verify_captcha_answer" name="captcha_answer" required />
+                <input type="hidden" id="verify_captcha_expected" name="captcha_expected" />
+              </div>
+              
+              {/* Honeypot fields - hidden from users, should remain empty */}
+              <div style="position: absolute; left: -9999px; opacity: 0; pointer-events: none;">
+                <input type="text" name="website" tabindex="-1" autocomplete="off" />
+                <input type="email" name="email_address" tabindex="-1" autocomplete="off" />
+                <input type="text" name="company" tabindex="-1" autocomplete="off" />
               </div>
               
               <button type="submit" className="btn btn-success">Submit Verification</button>
@@ -274,22 +328,44 @@ app.get('/api/predictions/:id', async (c) => {
 })
 
 // Add new prediction
-app.post('/api/predictions', async (c) => {
+app.post('/api/predictions', rateLimiter('/api/predictions'), async (c) => {
   const { env } = c
   
   try {
     const body = await c.req.json()
+    
+    // Check honeypot fields
+    if (!validateHoneypot(body.website) || !validateHoneypot(body.email_address) || !validateHoneypot(body.full_name)) {
+      console.log('Bot detected via honeypot in predictions endpoint');
+      return c.json({ error: 'Invalid request' }, 400);
+    }
+    
+    // Validate CAPTCHA
+    if (!validateCaptcha(body.captcha_answer, body.captcha_expected)) {
+      console.log('CAPTCHA validation failed in predictions endpoint');
+      return c.json({ error: 'Security verification failed' }, 400);
+    }
+    
+    // Validate and sanitize input
+    const validation = validateInput(body, 'prediction');
+    if (!validation.isValid) {
+      return c.json({ 
+        error: 'Validation failed', 
+        details: validation.errors 
+      }, 400);
+    }
+    
     const {
       predictor_name,
       prediction_text,
       predicted_date,
       target_date,
       target_description,
-      category = 'general',
+      category,
       confidence_level,
       source_url,
       notes
-    } = body
+    } = validation.sanitized!
     
     const { success, meta } = await env.DB.prepare(`
       INSERT INTO predictions 
@@ -320,12 +396,40 @@ app.post('/api/predictions', async (c) => {
 })
 
 // Add verification for a prediction
-app.post('/api/predictions/:id/verify', async (c) => {
+app.post('/api/predictions/:id/verify', rateLimiter('/api/predictions/*/verify'), async (c) => {
   const { env } = c
   const predictionId = c.req.param('id')
   
+  // Validate prediction ID
+  const idNum = parseInt(predictionId);
+  if (isNaN(idNum) || idNum <= 0) {
+    return c.json({ error: 'Invalid prediction ID' }, 400);
+  }
+  
   try {
     const body = await c.req.json()
+    
+    // Check honeypot fields
+    if (!validateHoneypot(body.website) || !validateHoneypot(body.email_address) || !validateHoneypot(body.company)) {
+      console.log('Bot detected via honeypot in verification endpoint');
+      return c.json({ error: 'Invalid request' }, 400);
+    }
+    
+    // Validate CAPTCHA  
+    if (!validateCaptcha(body.captcha_answer, body.captcha_expected)) {
+      console.log('CAPTCHA validation failed in verification endpoint');
+      return c.json({ error: 'Security verification failed' }, 400);
+    }
+    
+    // Validate and sanitize input
+    const validation = validateInput(body, 'verification');
+    if (!validation.isValid) {
+      return c.json({ 
+        error: 'Validation failed', 
+        details: validation.errors 
+      }, 400);
+    }
+    
     const {
       outcome,
       outcome_description,
@@ -333,7 +437,7 @@ app.post('/api/predictions/:id/verify', async (c) => {
       verified_by,
       confidence_score,
       notes
-    } = body
+    } = validation.sanitized!
     
     const { success, meta } = await env.DB.prepare(`
       INSERT INTO verifications 
