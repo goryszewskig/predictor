@@ -15,9 +15,11 @@ A SaaS application for tracking predictions and verifying their accuracy over ti
 
 ## 🌐 URLs
 
+- **Production**: https://prediction-tracker.pages.dev
+- **GitHub Repository**: https://github.com/goryszewskig/predictor
+- **API Base**: https://prediction-tracker.pages.dev/api
+- **Health Check**: https://prediction-tracker.pages.dev/api/stats
 - **Development**: https://3000-izmmrfnyhsi9kh9oxit8m-6532622b.e2b.dev
-- **API Base**: https://3000-izmmrfnyhsi9kh9oxit8m-6532622b.e2b.dev/api
-- **Health Check**: https://3000-izmmrfnyhsi9kh9oxit8m-6532622b.e2b.dev/api/stats
 
 ## 📊 Data Architecture
 
@@ -123,7 +125,9 @@ A SaaS application for tracking predictions and verifying their accuracy over ti
 ## 🚀 Deployment
 
 ### **Platform**: Cloudflare Pages
-### **Status**: ✅ Active (Development)
+### **Status**: ✅ Active (Production)
+### **Production URL**: https://prediction-tracker.pages.dev
+### **Database**: Cloudflare D1 (production database with sample data)
 ### **Last Updated**: 2025-08-16
 
 ### **Local Development**
